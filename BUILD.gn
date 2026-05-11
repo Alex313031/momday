@@ -1,0 +1,36 @@
+# Copyright 2026 Alex313031
+
+executable("momday") {
+  configs += [
+    ":momday_config",
+  ]
+  sources = [
+    "src/framework.h",
+    "src/globals.h",
+    "src/main.cc",
+    "src/main.h",
+    "src/momday.rc",
+    "src/resource.h",
+    "src/utils.cc",
+    "src/utils.h",
+    "src/version.h",
+  ]
+}
+
+config("momday_config") {
+  defines = []
+  cflags = []
+  include_dirs = [ "./src", ]
+  cflags += [
+    "-Wunused-function",
+  ]
+  libs = [
+    "kernel32",
+    "user32",
+    "shell32",
+    "comctl32",
+    "comdlg32",
+    "gdi32",
+    "winmm",
+  ]
+}
