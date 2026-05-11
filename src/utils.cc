@@ -455,6 +455,42 @@ bool FillRectWithColor(HDC hdc, const RECT& rc, COLORREF color) {
   return ok;
 }
 
+void FillRectWithGradient(HDC hdc,
+                          const RECT& rc,
+                          COLORREF topColor,
+                          COLORREF bottomColor) {
+  if (hdc == nullptr) {
+    return;
+  }
+  const int height = rc.bottom - rc.top;
+  if (height <= 0 || rc.right <= rc.left) {
+    return;
+  }
+  const int r1 = GetRValue(topColor);
+  const int g1 = GetGValue(topColor);
+  const int b1 = GetBValue(topColor);
+  const int r2 = GetRValue(bottomColor);
+  const int g2 = GetGValue(bottomColor);
+  const int b2 = GetBValue(bottomColor);
+  // One filled row per scan line. Denominator is (height - 1) so the
+  // very last row lands exactly on bottomColor instead of one step
+  // shy of it.
+  const double invSpan = (height > 1) ? 1.0 / (height - 1) : 0.0;
+  for (int y = rc.top; y < rc.bottom; ++y) {
+    const double t = (y - rc.top) * invSpan;
+    const int r = static_cast<int>(std::lround(r1 + (r2 - r1) * t));
+    const int g = static_cast<int>(std::lround(g1 + (g2 - g1) * t));
+    const int b = static_cast<int>(std::lround(b1 + (b2 - b1) * t));
+    HBRUSH hBr = CreateSolidBrush(RGB(r, g, b));
+    if (hBr == nullptr) {
+      continue;
+    }
+    RECT row = {rc.left, y, rc.right, y + 1};
+    FillRect(hdc, &row, hBr);
+    DeleteObject(hBr);
+  }
+}
+
 const std::wstring GetExeDir() {
   wchar_t exe_path[MAX_PATH];
   HMODULE this_app = GetModuleHandleW(nullptr);

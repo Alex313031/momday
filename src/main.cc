@@ -435,16 +435,17 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
     }
     case WM_PAINT: {
       // WM_ERASEBKGND returned TRUE so Windows skipped its bg fill - we
-      // paint g_bkg_color over the dirty region ourselves to keep the
-      // canvas blue, then layer the heart on top via DrawHeart (which
-      // owns its own DC).
+      // paint a vertical RGB_BLUE -> RGB_DARKBLUE gradient over the
+      // entire client rect (not just ps.rcPaint - we need the full
+      // client height so the gradient interpolation references the
+      // window, not the dirty region; BeginPaint's clip handles the
+      // rest). Then layer the heart on top via DrawHeart (its own DC).
       PAINTSTRUCT ps;
       HDC hdc = BeginPaint(hWnd, &ps);
-      FillRectWithColor(hdc, ps.rcPaint, g_bkg_color);
-      EndPaint(hWnd, &ps);
-
       RECT client;
       GetClientRect(hWnd, &client);
+      FillRectWithGradient(hdc, client, RGB_BLUE, RGB_DARKBLUE);
+      EndPaint(hWnd, &ps);
       // Heart is a centered square sized to ~75% of the smaller client
       // dimension so it scales with the window without crowding the edges.
       const LONG side = static_cast<LONG>(std::min(client.right, client.bottom) * 0.75f);

@@ -123,6 +123,16 @@ void DrawTooltipPopup(HWND hWnd, POINT cursorPos, const std::wstring& text);
 // can't forget the DeleteObject and leak a GDI brush).
 bool FillRectWithColor(HDC hdc, const RECT& rc, COLORREF color);
 
+// Fills a rect with a vertical gradient: rc.top maps to topColor and
+// rc.bottom maps to bottomColor, linearly interpolated per scan line.
+// One row per pixel - simple and avoids needing GdiGradientFill /
+// msimg32. Slightly wasteful (one brush per row) but trivial at the
+// scales we draw at.
+void FillRectWithGradient(HDC hdc,
+                          const RECT& rc,
+                          COLORREF topColor,
+                          COLORREF bottomColor);
+
 // Gets the current side by side directory, regardless of where .exe is started from
 const std::wstring GetExeDir();
 
