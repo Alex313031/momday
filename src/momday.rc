@@ -62,7 +62,9 @@ IDR_MAIN MENU
 BEGIN
     POPUP "&File"
     BEGIN
-        MENUITEM "E&xit",    IDM_EXIT
+        MENUITEM "&Repaint Hearts", IDM_REPAINT
+        MENUITEM SEPARATOR
+        MENUITEM "E&xit",           IDM_EXIT
     END
     POPUP "&About"
     BEGIN

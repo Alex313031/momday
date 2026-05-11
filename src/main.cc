@@ -46,6 +46,10 @@ bool can_use_582_controls = false;
 struct SatelliteHeart {
   RECT rect;
   COLORREF color;
+  // Set to true when the user left-clicks inside this satellite's
+  // (transformed) rect; WM_PAINT then fills the heart's interior with
+  // `color` instead of leaving it as just an outline.
+  bool filled = false;
 };
 static std::vector<SatelliteHeart> s_satellite_rects;
 static bool s_satellites_dirty = true;
@@ -66,6 +70,59 @@ struct SatelliteFrame {
   int mainSide;
 };
 static SatelliteFrame s_regen_frame = {0, 0, 0};
+
+// Maps a satellite rect from the regen-time frame into the current
+// main-heart frame. In wild mode (or before any layout has been
+// rolled) the stored rect is already authoritative. Used both by the
+// WM_PAINT loop and by the WM_LBUTTONDOWN hit-test so a click lands
+// against the same rectangle that's actually on screen.
+static RECT TransformSatelliteRect(const RECT& storedRect,
+                                   const RECT& currentMainHeart) {
+  if (wild_satellites || s_regen_frame.mainSide <= 0) {
+    return storedRect;
+  }
+  const int curSide = currentMainHeart.right - currentMainHeart.left;
+  if (curSide <= 0) {
+    return storedRect;
+  }
+  const int curCenterX = (currentMainHeart.left + currentMainHeart.right) / 2;
+  const int curCenterY = (currentMainHeart.top + currentMainHeart.bottom) / 2;
+  const double scale =
+      static_cast<double>(curSide) / static_cast<double>(s_regen_frame.mainSide);
+  const int origCx = (storedRect.left + storedRect.right) / 2;
+  const int origCy = (storedRect.top + storedRect.bottom) / 2;
+  const int origW  = storedRect.right - storedRect.left;
+  const int origH  = storedRect.bottom - storedRect.top;
+  const int newCx  = curCenterX + static_cast<int>(
+      std::lround((origCx - s_regen_frame.mainCenterX) * scale));
+  const int newCy = curCenterY + static_cast<int>(
+      std::lround((origCy - s_regen_frame.mainCenterY) * scale));
+  const int newW = std::max(1, static_cast<int>(std::lround(origW * scale)));
+  const int newH = std::max(1, static_cast<int>(std::lround(origH * scale)));
+  RECT r;
+  r.left   = newCx - newW / 2;
+  r.top    = newCy - newH / 2;
+  r.right  = r.left + newW;
+  r.bottom = r.top + newH;
+  return r;
+}
+
+// Returns the same heart bounding rect WM_PAINT computes for the main
+// centre heart - centred square sized to 75% of the smaller client
+// dimension. Used by the click hit-test so it computes against the
+// same numbers the paint code uses.
+static RECT MainHeartRect(HWND hWnd) {
+  RECT client;
+  GetClientRect(hWnd, &client);
+  const LONG side =
+      static_cast<LONG>(std::min(client.right, client.bottom) * 0.75f);
+  RECT r;
+  r.left   = (client.right - side) / 2;
+  r.top    = (client.bottom - side) / 2;
+  r.right  = r.left + side;
+  r.bottom = r.top + side;
+  return r;
+}
 
 // Click-tooltip state. WM_LBUTTONDOWN snapshots the cursor position and
 // the kToolTip1() text, flips s_tooltip_visible on, and arms a one-shot
@@ -318,6 +375,21 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
       s_tooltip_text    = (idx == 0) ? kToolTip1() : kToolTip2[idx - 1];
       s_tooltip_visible = true;
       ++s_tooltip_cycle;
+      // Hit-test against the satellites' on-screen rects (the same
+      // ones WM_PAINT renders, courtesy of TransformSatelliteRect)
+      // and flag the first one the click lands inside as filled. The
+      // next WM_PAINT will FillHeart that one with its outline color.
+      // First match wins on the rare chance two transformed rects
+      // overlap after a large resize.
+      const POINT clickPt    = {s_tooltip_pos.x, s_tooltip_pos.y};
+      const RECT mainHeart   = MainHeartRect(hWnd);
+      for (SatelliteHeart& s : s_satellite_rects) {
+        const RECT r = TransformSatelliteRect(s.rect, mainHeart);
+        if (PtInRect(&r, clickPt)) {
+          s.filled = true;
+          break;
+        }
+      }
       // Reset the dismiss timer on every click so a fresh click
       // restarts the 2.5-s window instead of being dismissed by a
       // stale fire from the previous click.
@@ -472,37 +544,15 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
           RegenerateSatellites(client.right, client.bottom, heartRect);
           s_satellites_dirty = false;
         }
-        // In wild mode the stored rect is already correct (WM_SIZE
-        // marked us dirty and we just re-rolled). In tame mode the
-        // stored rect was rolled against a possibly older main-heart
-        // frame, so map each rect from that frame into the current
-        // one: scale by mainSide ratio, translate by the centre
-        // delta. Net effect is "the whole composition zooms with the
-        // window".
-        const int curCenterX = (heartRect.left + heartRect.right) / 2;
-        const int curCenterY = (heartRect.top + heartRect.bottom) / 2;
-        const int curSide    = heartRect.right - heartRect.left;
+        // Transform each stored satellite rect into its on-screen
+        // rect (no-op in wild mode, scale+translate in tame mode), and
+        // if the user has clicked it, fill the interior with the
+        // satellite's outline color before drawing the outline on top
+        // - same fill-then-stroke order as the main heart.
         for (const SatelliteHeart& s : s_satellite_rects) {
-          RECT r = s.rect;
-          if (!wild_satellites && s_regen_frame.mainSide > 0 && curSide > 0) {
-            const double scale = static_cast<double>(curSide) /
-                                 static_cast<double>(s_regen_frame.mainSide);
-            const int origCx = (s.rect.left + s.rect.right) / 2;
-            const int origCy = (s.rect.top + s.rect.bottom) / 2;
-            const int origW  = s.rect.right - s.rect.left;
-            const int origH  = s.rect.bottom - s.rect.top;
-            const int newCx = curCenterX + static_cast<int>(
-                std::lround((origCx - s_regen_frame.mainCenterX) * scale));
-            const int newCy = curCenterY + static_cast<int>(
-                std::lround((origCy - s_regen_frame.mainCenterY) * scale));
-            const int newW = std::max(
-                1, static_cast<int>(std::lround(origW * scale)));
-            const int newH = std::max(
-                1, static_cast<int>(std::lround(origH * scale)));
-            r.left   = newCx - newW / 2;
-            r.top    = newCy - newH / 2;
-            r.right  = r.left + newW;
-            r.bottom = r.top + newH;
+          const RECT r = TransformSatelliteRect(s.rect, heartRect);
+          if (s.filled) {
+            FillHeart(hWnd, r, s.color);
           }
           DrawHeart(hWnd, r, s.color);
         }

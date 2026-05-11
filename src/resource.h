@@ -19,6 +19,7 @@
 #define IDM_ABOUT                   200
 #define IDM_EXIT                    201
 #define IDM_HELP                    202
+#define IDM_REPAINT                 203
 
 // Timers
 #define TIMER_HEARTS                300 // Timer ID for painting
