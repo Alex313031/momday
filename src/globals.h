@@ -17,4 +17,6 @@ extern COLORREF g_bkg_color; // Current background color, changed via the Colors
 
 extern bool can_use_582_controls; // Whether we can use "modern" common controls from XP+
 
+inline constexpr bool is_stepmom_mode = false; // Whether this build is for step mom or not.
+
 #endif // MOMDAY_GLOBALS_H_

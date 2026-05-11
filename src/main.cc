@@ -43,8 +43,29 @@ bool can_use_582_controls = false;
 // what s_satellites_dirty tracks. WM_SIZE flips it true, WM_PAINT clears
 // it after regenerating.
 // MAX_EXTRA_HEARTS lives in utils.h since it's a public-facing knob.
-static std::vector<RECT> s_satellite_rects;
+struct SatelliteHeart {
+  RECT rect;
+  COLORREF color;
+};
+static std::vector<SatelliteHeart> s_satellite_rects;
 static bool s_satellites_dirty = true;
+
+// Color palette satellites pick from. Kept side-by-side with the
+// satellite layout so it's easy to add or swap colors without touching
+// the regen function.
+static constexpr COLORREF kSatelliteColors[] = {RGB_YELLOW, RGB_CYAN, RGB_MAGENTA};
+
+// Reference frame the satellite layout was rolled against - the main
+// heart's centre and side length at regen time. Used in tame mode
+// (wild_satellites == false) to scale + translate stored satellite
+// rects to track the main heart as the client area resizes, instead of
+// re-rolling the layout and flickering the satellites every WM_SIZE.
+struct SatelliteFrame {
+  int mainCenterX;
+  int mainCenterY;
+  int mainSide;
+};
+static SatelliteFrame s_regen_frame = {0, 0, 0};
 
 // Re-rolls s_satellite_rects with up to MAX_EXTRA_HEARTS non-overlapping
 // rects. Each rect's width and height are drawn independently from
@@ -62,6 +83,8 @@ static void RegenerateSatellites(int clientW, int clientH, const RECT& mainRect)
   // resize gives a different layout instead of always the same pattern.
   static std::mt19937 rng{std::random_device{}()};
   std::uniform_int_distribution<int> sizeDist(kSatelliteMinSize, kSatelliteMaxSize);
+  std::uniform_int_distribution<size_t> colorDist(
+      0, (sizeof(kSatelliteColors) / sizeof(kSatelliteColors[0])) - 1);
   constexpr int kMaxAttemptsPerHeart = 32;
   for (UINT i = 0; i < MAX_EXTRA_HEARTS; ++i) {
     for (int attempt = 0; attempt < kMaxAttemptsPerHeart; ++attempt) {
@@ -80,11 +103,23 @@ static void RegenerateSatellites(int clientW, int clientH, const RECT& mainRect)
       // which is exactly what we want for "satellite is outside the main
       // heart". The first arg is required even though we don't use it.
       if (!IntersectRect(&discardedIntx, &candidate, &mainRect)) {
-        s_satellite_rects.push_back(candidate);
+        // Pick the color now (alongside the rect) so it stays stable
+        // across paints - drawing a fresh random color each WM_PAINT
+        // would make the satellites flicker between hues every frame.
+        SatelliteHeart sh;
+        sh.rect  = candidate;
+        sh.color = kSatelliteColors[colorDist(rng)];
+        s_satellite_rects.push_back(sh);
         break;
       }
     }
   }
+  // Snapshot the main heart's frame this layout was rolled against.
+  // Tame-mode resize handling reads this back to transform the stored
+  // satellite rects on the fly instead of re-rolling them.
+  s_regen_frame.mainCenterX = (mainRect.left + mainRect.right) / 2;
+  s_regen_frame.mainCenterY = (mainRect.top + mainRect.bottom) / 2;
+  s_regen_frame.mainSide    = mainRect.right - mainRect.left;
 }
 
 bool RegisterWndClass(HINSTANCE hInstance, LPCWSTR className) {
@@ -205,12 +240,21 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
       break;
     case WM_TIMER:
       if (wParam == TIMER_HEARTS) {
-        // Drive the DrawHeart animation: each tick bumps the shared
-        // progress counter and asks for a repaint. Stop invalidating once
-        // we've reached the meeting point so we're not doing pointless
-        // work for a heart that's already fully drawn.
+        // Two-phase animation: the heart (and the top marquee that
+        // shares its counter) animates first, then the bottom marquee
+        // takes over via g_subtext_step. Each tick advances whichever
+        // counter is still unfinished and only invalidates if something
+        // actually changed - a heart that's fully drawn AND a subtext
+        // that's fully slid in means there's nothing left to redraw.
+        bool advanced = false;
         if (g_heart_step < g_heart_max_steps) {
           ++g_heart_step;
+          advanced = true;
+        } else if (g_subtext_step < g_subtext_max_steps) {
+          ++g_subtext_step;
+          advanced = true;
+        }
+        if (advanced) {
           InvalidateRect(hWnd, nullptr, FALSE);
         }
       }
@@ -224,8 +268,8 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
       return TRUE;
     case WM_GETMINMAXINFO: {
       LPMINMAXINFO pMinMaxInfo = reinterpret_cast<LPMINMAXINFO>(lParam);;
-      pMinMaxInfo->ptMinTrackSize.x = 200;
-      pMinMaxInfo->ptMinTrackSize.y = 200;
+      pMinMaxInfo->ptMinTrackSize.x = CW_MINWIDTH;
+      pMinMaxInfo->ptMinTrackSize.y = CW_MINHEIGHT;
       const int MAXWIDTH            = GetSystemMetrics(SM_CXMAXIMIZED);
       const int MAXHEIGHT           = GetSystemMetrics(SM_CYMAXIMIZED);
       pMinMaxInfo->ptMaxTrackSize.x = MAXWIDTH;
@@ -253,6 +297,13 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
         heartRect.top    = (client.bottom - side) / 2;
         heartRect.right  = heartRect.left + side;
         heartRect.bottom = heartRect.top + side;
+        // Once the outline is fully traced, fill the interior with red
+        // so the heart "comes to life" at the climax. Has to happen
+        // before DrawHeart so the magenta outline lands on top of the
+        // red fill instead of being covered by it.
+        if (g_heart_step >= g_heart_max_steps) {
+          FillHeart(hWnd, heartRect, RGB_RED);
+        }
         DrawHeart(hWnd, heartRect);
 
         // Lazy regen: WM_SIZE marked us dirty (or this is the first
@@ -263,9 +314,64 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
           RegenerateSatellites(client.right, client.bottom, heartRect);
           s_satellites_dirty = false;
         }
-        for (const RECT& r : s_satellite_rects) {
-          DrawHeart(hWnd, r);
+        // In wild mode the stored rect is already correct (WM_SIZE
+        // marked us dirty and we just re-rolled). In tame mode the
+        // stored rect was rolled against a possibly older main-heart
+        // frame, so map each rect from that frame into the current
+        // one: scale by mainSide ratio, translate by the centre
+        // delta. Net effect is "the whole composition zooms with the
+        // window".
+        const int curCenterX = (heartRect.left + heartRect.right) / 2;
+        const int curCenterY = (heartRect.top + heartRect.bottom) / 2;
+        const int curSide    = heartRect.right - heartRect.left;
+        for (const SatelliteHeart& s : s_satellite_rects) {
+          RECT r = s.rect;
+          if (!wild_satellites && s_regen_frame.mainSide > 0 && curSide > 0) {
+            const double scale = static_cast<double>(curSide) /
+                                 static_cast<double>(s_regen_frame.mainSide);
+            const int origCx = (s.rect.left + s.rect.right) / 2;
+            const int origCy = (s.rect.top + s.rect.bottom) / 2;
+            const int origW  = s.rect.right - s.rect.left;
+            const int origH  = s.rect.bottom - s.rect.top;
+            const int newCx = curCenterX + static_cast<int>(
+                std::lround((origCx - s_regen_frame.mainCenterX) * scale));
+            const int newCy = curCenterY + static_cast<int>(
+                std::lround((origCy - s_regen_frame.mainCenterY) * scale));
+            const int newW = std::max(
+                1, static_cast<int>(std::lround(origW * scale)));
+            const int newH = std::max(
+                1, static_cast<int>(std::lround(origH * scale)));
+            r.left   = newCx - newW / 2;
+            r.top    = newCy - newH / 2;
+            r.right  = r.left + newW;
+            r.bottom = r.top + newH;
+          }
+          DrawHeart(hWnd, r, s.color);
         }
+
+        // Marquees: kMessage1 in the top margin (72-px), kMessage2 in
+        // the lower third (36-px). kMessage1 shares the heart's
+        // progress so it lands centered the moment the heart finishes
+        // tracing; kMessage2 keys off the phase-2 counter so it stays
+        // off-screen until the heart and the top marquee are done.
+        constexpr int kMarqueeFontSize    = 72;
+        constexpr int kMarqueeTopPad      = 8;
+        constexpr int kSubMarqueeFontSize = 36;
+        const double heartProgress =
+            static_cast<double>(g_heart_step) / static_cast<double>(g_heart_max_steps);
+        DrawMarquee(hWnd, client, kMarqueeTopPad, kMessage1, kMarqueeFontSize,
+                    heartProgress);
+
+        // Center kMessage2 vertically inside the bottom-third band so
+        // it sits clear of the main heart and centers nicely as the
+        // window resizes.
+        const int lowerThirdTop = static_cast<int>(client.bottom * 2.0f / 3.0f);
+        const int subY =
+            lowerThirdTop + ((client.bottom - lowerThirdTop) - kSubMarqueeFontSize) / 2;
+        const double subProgress = static_cast<double>(g_subtext_step) /
+                                   static_cast<double>(g_subtext_max_steps);
+        DrawMarquee(hWnd, client, subY, kMessage2, kSubMarqueeFontSize, subProgress,
+                    /*slideFromLeft=*/true);
       }
       break;
     }
@@ -284,10 +390,14 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
       if (cyClient < 0) {
         cyClient = 0;
       }
-      // Client size changed - the main heart rect (and the surrounding
-      // free area) move, so the satellite layout has to be rolled fresh
-      // on the next WM_PAINT.
-      s_satellites_dirty = true;
+      // Client size changed. In wild mode we re-roll the whole layout
+      // (which is what makes the hearts pop in/out as you drag a
+      // resize). In tame mode we leave the stored rects alone and let
+      // WM_PAINT transform them against the new main heart so the
+      // composition just zooms/translates with the window.
+      if (wild_satellites) {
+        s_satellites_dirty = true;
+      }
       break;
     }
     case WM_COMMAND: {

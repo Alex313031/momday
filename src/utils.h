@@ -18,11 +18,16 @@ typedef void(WINAPI* RtlGetNtVersionNumbers_t)(DWORD* pNtMajorVersion,
 #define RGB_CYAN    RGB(0, 255, 255)
 #define RGB_MAGENTA RGB(255, 0, 255)
 
-#define RGB_DARKBLUE RGB(0, 0, 192)
+#define RGB_DARKBLUE RGB(0, 0, 128)
 
+// When true, satellite hearts are redrawn widely on WM_RESIZE, otherwise, they adjust their position
+// to stay as close (relatively) to their original positions in relation to the main center heart.
+static constexpr bool wild_satellites = false;
+
+// Strings printed in UI
 extern const std::wstring kMessage1;
-extern const wchar_t kMessage2;
-extern const wchar_t kMessage3;
+extern const std::wstring kMessage2;
+extern const std::wstring kToolTip1();
 
 // Default desired ant canvas size (NOT the outer window size). wWinMain
 // adds the OS chrome and the toolbar's measured height on top of these
@@ -31,6 +36,10 @@ extern const wchar_t kMessage3;
 // menu bar / toolbar end up being.
 inline constexpr INT CW_WIDTH  = 800;
 inline constexpr INT CW_HEIGHT = 600;
+
+// Min window size
+inline constexpr INT CW_MINWIDTH  = 480;
+inline constexpr INT CW_MINHEIGHT = 480;
 
 // Child window style
 inline constexpr DWORD dwCHILD = WS_CHILD | WS_VISIBLE;
@@ -45,7 +54,7 @@ extern bool g_debug_mode;
 // Maximum number of extra smaller hearts to draw, besides the main large one in the center.
 inline constexpr UINT MAX_EXTRA_HEARTS = 9u;
 // Min/Max size of satellite hearts
-inline constexpr int kSatelliteMinSize = 32;
+inline constexpr int kSatelliteMinSize = 48;
 inline constexpr int kSatelliteMaxSize = 72;
 
 // Heart animation state. The four strokes drawn by DrawHeart all key off
@@ -54,11 +63,44 @@ inline constexpr int kSatelliteMaxSize = 72;
 extern int g_heart_step;
 extern const int g_heart_max_steps;
 
-// Draws a single heart, see .cc
-void DrawHeart(HWND hWnd, RECT boundingRect);
+// Phase-2 animation state. Used by elements that should only start
+// animating after g_heart_step has reached its max - e.g. the second
+// marquee that slides in once the heart and the top marquee are done.
+extern int g_subtext_step;
+extern const int g_subtext_max_steps;
 
-// Gets the desired font at the specified size, defaults to Tahoma.
-HFONT GetFont(std::wstring font = L"Tahoma", int size);
+// Draws a single heart with a 2-px outline in `outlineColor`. See .cc
+// for the geometry. Default color is magenta to match the main heart.
+void DrawHeart(HWND hWnd, RECT boundingRect, COLORREF outlineColor = RGB_MAGENTA);
+
+// Fills the heart's interior (the closed shape that DrawHeart traces at
+// progress == 1.0) with `fillColor`. Call BEFORE DrawHeart so the
+// outline lands on top of the fill instead of being covered by it.
+void FillHeart(HWND hWnd, RECT boundingRect, COLORREF fillColor);
+
+// Gets the desired font at the specified size (in pixels). Face name
+// defaults to Tahoma. Caller owns the returned HFONT and must
+// DeleteObject it when done. Returns nullptr on failure.
+//
+// (Param order: size first because in C++ a defaulted parameter can't
+// precede a non-defaulted one - so the original "font first, size
+// second" wouldn't compile.)
+HFONT GetFont(int size, std::wstring font = L"Tahoma");
+
+// Slides `text` in to horizontally centered, with its top edge anchored
+// at `yPos` inside `clientRect`. `progress` is the animation progress in
+// [0, 1] (clamped) - caller picks which step counter drives it (e.g.
+// g_heart_step for the top marquee, g_subtext_step for the second one
+// that waits until phase 2). `slideFromLeft == true` starts the text
+// fully off the left edge of clientRect; `false` starts it off the
+// right edge.
+void DrawMarquee(HWND hWnd,
+                 RECT clientRect,
+                 int yPos,
+                 const std::wstring& text,
+                 int fontSize,
+                 double progress,
+                 bool slideFromLeft = false);
 
 // Fills a rect with a solid color. Wraps the CreateSolidBrush + FillRect
 // + DeleteObject trio so call sites don't have to repeat all three (and

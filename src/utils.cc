@@ -2,14 +2,19 @@
 
 #include <shlwapi.h>
 
-#include <cmath>
-
 #include "globals.h"
 #include "resource.h"
 
+// Marquee messages
 const std::wstring kMessage1 = L"Happy Mother's Day!";
-const std::wstring kMessage2 = L"Made with love by ";
-const std::wstring kMessage3 = L" - The Frickster";
+const std::wstring kMessage2 = L" - Made with love in C++ by the Frickster";
+
+// Text for tooltip popup.
+const std::wstring kToolTip1() {
+  const std::wstring msg =
+    L"I loves da " + is_stepmom_mode ? L"Laura" : L"Giovanna";
+  return msg;
+}
 
 namespace {
 constexpr double kPi = 3.14159265358979323846;
@@ -20,6 +25,9 @@ constexpr int kFullArcSamples = 128;
 
 int g_heart_step = 0;
 const int g_heart_max_steps = 100;
+
+int g_subtext_step = 0;
+const int g_subtext_max_steps = 100;
 
 // Draws a heart, starting at the top and bottom simultaneously and then meeting in the middle, bounded by
 // boundingRect.
@@ -33,7 +41,7 @@ const int g_heart_max_steps = 100;
 // Progress (g_heart_step / g_heart_max_steps) drives all four strokes off
 // the same parameter, so the top arcs and the V lines all arrive at the
 // side meeting points simultaneously when progress hits 1.0.
-void DrawHeart(HWND hWnd, RECT boundingRect) {
+void DrawHeart(HWND hWnd, RECT boundingRect, COLORREF outlineColor) {
   if (hWnd == nullptr) {
     return;
   }
@@ -42,7 +50,7 @@ void DrawHeart(HWND hWnd, RECT boundingRect) {
     return;
   }
 
-  HPEN hPen = CreatePen(PS_SOLID, 2, RGB_MAGENTA);
+  HPEN hPen = CreatePen(PS_SOLID, 2, outlineColor);
   if (hPen == nullptr) {
     ReleaseDC(hWnd, hdc);
     return;
@@ -170,14 +178,14 @@ void DrawHeart(HWND hWnd, RECT boundingRect) {
       SetPixel(hdc,
                static_cast<int>(std::lround(leftCx + r * std::cos(leftArcEndTheta))),
                static_cast<int>(std::lround(lobeCy + r * std::sin(leftArcEndTheta))),
-               RGB_MAGENTA);
+               outlineColor);
       const double rightArcEndTheta = kPi + totalSweep * progress;
       SetPixel(hdc,
                static_cast<int>(std::lround(rightCx + r * std::cos(rightArcEndTheta))),
                static_cast<int>(std::lround(lobeCy + r * std::sin(rightArcEndTheta))),
-               RGB_MAGENTA);
-      SetPixel(hdc, static_cast<int>(blEndX), static_cast<int>(blEndY), RGB_MAGENTA);
-      SetPixel(hdc, static_cast<int>(brEndX), static_cast<int>(brEndY), RGB_MAGENTA);
+               outlineColor);
+      SetPixel(hdc, static_cast<int>(blEndX), static_cast<int>(blEndY), outlineColor);
+      SetPixel(hdc, static_cast<int>(brEndX), static_cast<int>(brEndY), outlineColor);
     }
   }
 
@@ -186,7 +194,155 @@ void DrawHeart(HWND hWnd, RECT boundingRect) {
   ReleaseDC(hWnd, hdc);
 }
 
-HFONT GetFont(std::wstring font, int size) {
+// Geometry has to mirror DrawHeart's. If you tweak the heart shape there
+// (lobe radius, extraSweep formula, meeting points, etc.), update the
+// matching block here too or the fill will start poking out from under
+// the outline.
+void FillHeart(HWND hWnd, RECT boundingRect, COLORREF fillColor) {
+  if (hWnd == nullptr) {
+    return;
+  }
+  const double W = static_cast<double>(boundingRect.right - boundingRect.left);
+  const double H = static_cast<double>(boundingRect.bottom - boundingRect.top);
+  if (W < 4.0 || H < 4.0) {
+    return;
+  }
+  HDC hdc = GetDC(hWnd);
+  if (hdc == nullptr) {
+    return;
+  }
+
+  const double Lx      = static_cast<double>(boundingRect.left);
+  const double Ty      = static_cast<double>(boundingRect.top);
+  const double r       = W / 4.0;
+  const double leftCx  = Lx + W * 0.25;
+  const double rightCx = Lx + W * 0.75;
+  const double lobeCy  = Ty + W * 0.25;
+  const double centerX = Lx + W * 0.5;
+  const double bottomY = Ty + H;
+
+  double extraSweep = 0.0;
+  const double k    = 4.0 * H / W;
+  if (k > 1.001) {
+    extraSweep = 2.0 * std::atan(1.0 / (k - 1.0));
+    if (extraSweep > kPi * 0.5) {
+      extraSweep = kPi * 0.5;
+    }
+  }
+  const double totalSweep = kPi + extraSweep;
+
+  // Build the closed boundary CCW (visually): top dip → over the left
+  // lobe and curl down to the left meet → bottom point → right meet →
+  // back over the right lobe to the top dip. Polygon auto-closes by
+  // connecting the last point to the first; the start/end are the same
+  // top-dip pixel anyway, so the close is degenerate (no extra edge).
+  std::vector<POINT> pts;
+  pts.reserve(2 * (kFullArcSamples + 1) + 1);
+
+  for (int i = 0; i <= kFullArcSamples; ++i) {
+    const double frac  = static_cast<double>(i) / kFullArcSamples;
+    const double theta = -totalSweep * frac;
+    POINT p;
+    p.x = static_cast<LONG>(std::lround(leftCx + r * std::cos(theta)));
+    p.y = static_cast<LONG>(std::lround(lobeCy + r * std::sin(theta)));
+    pts.push_back(p);
+  }
+  POINT bottomPt;
+  bottomPt.x = static_cast<LONG>(std::lround(centerX));
+  bottomPt.y = static_cast<LONG>(std::lround(bottomY));
+  pts.push_back(bottomPt);
+  for (int i = kFullArcSamples; i >= 0; --i) {
+    const double frac  = static_cast<double>(i) / kFullArcSamples;
+    const double theta = kPi + totalSweep * frac;
+    POINT p;
+    p.x = static_cast<LONG>(std::lround(rightCx + r * std::cos(theta)));
+    p.y = static_cast<LONG>(std::lround(lobeCy + r * std::sin(theta)));
+    pts.push_back(p);
+  }
+
+  HBRUSH hBrush = CreateSolidBrush(fillColor);
+  if (hBrush == nullptr) {
+    ReleaseDC(hWnd, hdc);
+    return;
+  }
+  // NULL_PEN suppresses Polygon's outline pass - we only want the fill,
+  // since DrawHeart will lay its own magenta outline on top.
+  HPEN hOldPen     = static_cast<HPEN>(SelectObject(hdc, GetStockObject(NULL_PEN)));
+  HBRUSH hOldBrush = static_cast<HBRUSH>(SelectObject(hdc, hBrush));
+  Polygon(hdc, pts.data(), static_cast<int>(pts.size()));
+  SelectObject(hdc, hOldBrush);
+  SelectObject(hdc, hOldPen);
+  DeleteObject(hBrush);
+  ReleaseDC(hWnd, hdc);
+}
+
+HFONT GetFont(int size, std::wstring font) {
+  // Negative height = "character height" in logical units (the cap
+  // box), so passing -size yields ~size-pixel-tall glyphs on a
+  // standard MM_TEXT DC. ANTIALIASED_QUALITY keeps big text from
+  // looking jagged - the rest of the app embraces a retro aliased
+  // look but 72-px text without smoothing is unreadable.
+  // bItalic = TRUE turns on the italic style for the requested face.
+  return CreateFontW(-size, 0, 0, 0, FW_NORMAL, TRUE, FALSE, FALSE,
+                     DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                     ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
+                     font.c_str());
+}
+
+void DrawMarquee(HWND hWnd,
+                 RECT clientRect,
+                 int yPos,
+                 const std::wstring& text,
+                 int fontSize,
+                 double progress,
+                 bool slideFromLeft) {
+  if (hWnd == nullptr || text.empty() || fontSize <= 0) {
+    return;
+  }
+  HDC hdc = GetDC(hWnd);
+  if (hdc == nullptr) {
+    return;
+  }
+  HFONT hFont = GetFont(fontSize);
+  if (hFont == nullptr) {
+    ReleaseDC(hWnd, hdc);
+    return;
+  }
+  HFONT hOldFont = static_cast<HFONT>(SelectObject(hdc, hFont));
+
+  // Measure once we've selected the font into the DC so the metrics
+  // reflect the right face / size.
+  SIZE textSize = {0, 0};
+  GetTextExtentPoint32W(hdc, text.c_str(), static_cast<int>(text.length()),
+                        &textSize);
+
+  // Clamp the caller-supplied progress so a stale/overshot step counter
+  // doesn't push the text past its centered resting position.
+  const double clamped = std::min(1.0, std::max(0.0, progress));
+
+  // slideFromLeft starts the text with its right edge at clientRect.left
+  // (i.e. fully off the left side); the default puts its left edge at
+  // clientRect.right (fully off the right side). Either way the text
+  // settles in the same centered endX.
+  const double startX = slideFromLeft
+      ? static_cast<double>(clientRect.left) - static_cast<double>(textSize.cx)
+      : static_cast<double>(clientRect.right);
+  const double endX = (static_cast<double>(clientRect.right) -
+                       static_cast<double>(textSize.cx)) *
+                      0.5;
+  const int x = static_cast<int>(std::lround(startX + (endX - startX) * clamped));
+
+  // Transparent bg so the dark blue canvas shows through instead of
+  // a white box behind the glyphs.
+  const int oldBkMode      = SetBkMode(hdc, TRANSPARENT);
+  const COLORREF oldColor  = SetTextColor(hdc, RGB_WHITE);
+  TextOutW(hdc, x, yPos, text.c_str(), static_cast<int>(text.length()));
+  SetTextColor(hdc, oldColor);
+  SetBkMode(hdc, oldBkMode);
+
+  SelectObject(hdc, hOldFont);
+  DeleteObject(hFont);
+  ReleaseDC(hWnd, hdc);
 }
 
 bool FillRectWithColor(HDC hdc, const RECT& rc, COLORREF color) {
