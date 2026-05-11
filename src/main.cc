@@ -23,7 +23,7 @@ int cyClient = 0;
 static bool s_was_minimized = false;
 
 // Current background color. Defaults to blue;
-COLORREF g_bkg_color = RGB_BLUE;
+COLORREF g_bkg_color = RGB_DARKBLUE;
 
 bool g_debug_mode   = is_debug;
 
@@ -34,13 +34,70 @@ HICON kSmallIcon = nullptr;
 // Whether we have commctl32 5.82 (XP/I.E 6.0)
 bool can_use_582_controls = false;
 
+// Smaller hearts scattered around the main center heart. Each rect is
+// independently random in width and height (kSatelliteMinSize ..
+// kSatelliteMaxSize) and randomly placed inside the client area but not
+// overlapping the main heart's bounding rect. The layout is persisted
+// across WM_PAINTs (so the satellites don't jitter every frame) and only
+// re-rolled when the client size or the main heart rect change - that's
+// what s_satellites_dirty tracks. WM_SIZE flips it true, WM_PAINT clears
+// it after regenerating.
+// MAX_EXTRA_HEARTS lives in utils.h since it's a public-facing knob.
+static std::vector<RECT> s_satellite_rects;
+static bool s_satellites_dirty = true;
+
+// Re-rolls s_satellite_rects with up to MAX_EXTRA_HEARTS non-overlapping
+// rects. Each rect's width and height are drawn independently from
+// [kSatelliteMinSize, kSatelliteMaxSize], and placement is rejected if
+// the rect would intersect mainRect (so satellites never spill into the
+// main heart's space). If a rect can't be placed within a bounded number
+// of attempts, it's just skipped - useful when the surrounding margin is
+// too crowded or the window is too small.
+static void RegenerateSatellites(int clientW, int clientH, const RECT& mainRect) {
+  s_satellite_rects.clear();
+  if (clientW <= kSatelliteMinSize || clientH <= kSatelliteMinSize) {
+    return;
+  }
+  // Seed once. Subsequent calls keep advancing the same stream so each
+  // resize gives a different layout instead of always the same pattern.
+  static std::mt19937 rng{std::random_device{}()};
+  std::uniform_int_distribution<int> sizeDist(kSatelliteMinSize, kSatelliteMaxSize);
+  constexpr int kMaxAttemptsPerHeart = 32;
+  for (UINT i = 0; i < MAX_EXTRA_HEARTS; ++i) {
+    for (int attempt = 0; attempt < kMaxAttemptsPerHeart; ++attempt) {
+      const int w = sizeDist(rng);
+      const int h = sizeDist(rng);
+      if (w >= clientW || h >= clientH) {
+        continue;
+      }
+      std::uniform_int_distribution<int> xDist(0, clientW - w);
+      std::uniform_int_distribution<int> yDist(0, clientH - h);
+      const int x = xDist(rng);
+      const int y = yDist(rng);
+      RECT candidate     = {x, y, x + w, y + h};
+      RECT discardedIntx = {0, 0, 0, 0};
+      // IntersectRect returns FALSE when the two rects don't intersect,
+      // which is exactly what we want for "satellite is outside the main
+      // heart". The first arg is required even though we don't use it.
+      if (!IntersectRect(&discardedIntx, &candidate, &mainRect)) {
+        s_satellite_rects.push_back(candidate);
+        break;
+      }
+    }
+  }
+}
+
 bool RegisterWndClass(HINSTANCE hInstance, LPCWSTR className) {
   if (kMainIcon == nullptr || kSmallIcon == nullptr) {
     return false;
   }
   WNDCLASSEXW wndclass;
   wndclass.cbSize      = sizeof(WNDCLASSEX);
-  wndclass.style       = 0;
+  // CS_HREDRAW | CS_VREDRAW asks the OS to invalidate the entire client area
+  // on any width or height change so the heart re-centers and re-renders at
+  // the new client size during a resize without us having to InvalidateRect
+  // by hand from WM_SIZE.
+  wndclass.style       = CS_HREDRAW | CS_VREDRAW;
   wndclass.lpfnWndProc = WindowProc;
   wndclass.cbClsExtra  = 0;
   wndclass.cbWndExtra  = 0;
@@ -147,6 +204,16 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
       InitApp(hWnd);
       break;
     case WM_TIMER:
+      if (wParam == TIMER_HEARTS) {
+        // Drive the DrawHeart animation: each tick bumps the shared
+        // progress counter and asks for a repaint. Stop invalidating once
+        // we've reached the meeting point so we're not doing pointless
+        // work for a heart that's already fully drawn.
+        if (g_heart_step < g_heart_max_steps) {
+          ++g_heart_step;
+          InvalidateRect(hWnd, nullptr, FALSE);
+        }
+      }
       break;
     case WM_APP_AUTOPLAY:
       break;
@@ -166,12 +233,40 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
       break;
     }
     case WM_PAINT: {
-      // BeginPaint validates the dirty region and fills ps.rcPaint with the
-      // bounding rect of the area Windows wants us to repaint. Nothing is
-      // drawn to the screen until EndPaint is called.
+      // WM_ERASEBKGND returned TRUE so Windows skipped its bg fill - we
+      // paint g_bkg_color over the dirty region ourselves to keep the
+      // canvas blue, then layer the heart on top via DrawHeart (which
+      // owns its own DC).
       PAINTSTRUCT ps;
       HDC hdc = BeginPaint(hWnd, &ps);
+      FillRectWithColor(hdc, ps.rcPaint, g_bkg_color);
       EndPaint(hWnd, &ps);
+
+      RECT client;
+      GetClientRect(hWnd, &client);
+      // Heart is a centered square sized to ~75% of the smaller client
+      // dimension so it scales with the window without crowding the edges.
+      const LONG side = static_cast<LONG>(std::min(client.right, client.bottom) * 0.75f);
+      if (side >= 8) {
+        RECT heartRect;
+        heartRect.left   = (client.right - side) / 2;
+        heartRect.top    = (client.bottom - side) / 2;
+        heartRect.right  = heartRect.left + side;
+        heartRect.bottom = heartRect.top + side;
+        DrawHeart(hWnd, heartRect);
+
+        // Lazy regen: WM_SIZE marked us dirty (or this is the first
+        // paint). Recompute the satellite layout against the current
+        // client rect and the just-computed main heart rect, then draw
+        // each satellite in the same animation step as the main heart.
+        if (s_satellites_dirty) {
+          RegenerateSatellites(client.right, client.bottom, heartRect);
+          s_satellites_dirty = false;
+        }
+        for (const RECT& r : s_satellite_rects) {
+          DrawHeart(hWnd, r);
+        }
+      }
       break;
     }
     case WM_SIZE: {
@@ -189,6 +284,10 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
       if (cyClient < 0) {
         cyClient = 0;
       }
+      // Client size changed - the main heart rect (and the surrounding
+      // free area) move, so the satellite layout has to be rolled fresh
+      // on the next WM_PAINT.
+      s_satellites_dirty = true;
       break;
     }
     case WM_COMMAND: {
@@ -217,7 +316,7 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
     case WM_QUERYENDSESSION:
       return TRUE;
     case WM_DESTROY:
-      // TODO: Kill timer
+      KillTimer(hWnd, TIMER_HEARTS);
       PostQuitMessage(0);
       break;
     case WM_NCDESTROY:
@@ -230,13 +329,15 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
 }
 
 bool InitApp(HWND hWnd) {
-  bool ok = false;
   if (hWnd == nullptr) {
     return false;
   }
-  // TODO Start heart painting timer here and set ok
-  ok = true;
-  return ok;
+  // ~33 fps tick rate. With g_heart_max_steps == 100 the heart finishes
+  // drawing in ~3 seconds. The timer is torn down in WM_DESTROY.
+  if (SetTimer(hWnd, TIMER_HEARTS, 30, nullptr) == 0) {
+    return false;
+  }
+  return true;
 }
 
 void ShutDownApp() {

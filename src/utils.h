@@ -18,9 +18,11 @@ typedef void(WINAPI* RtlGetNtVersionNumbers_t)(DWORD* pNtMajorVersion,
 #define RGB_CYAN    RGB(0, 255, 255)
 #define RGB_MAGENTA RGB(255, 0, 255)
 
-// Large and small main application icons
-extern HICON kMainIcon;
-extern HICON kSmallIcon;
+#define RGB_DARKBLUE RGB(0, 0, 192)
+
+extern const std::wstring kMessage1;
+extern const wchar_t kMessage2;
+extern const wchar_t kMessage3;
 
 // Default desired ant canvas size (NOT the outer window size). wWinMain
 // adds the OS chrome and the toolbar's measured height on top of these
@@ -40,8 +42,23 @@ inline constexpr DWORD dwComCtl32TargetVer =
 
 extern bool g_debug_mode;
 
+// Maximum number of extra smaller hearts to draw, besides the main large one in the center.
+inline constexpr UINT MAX_EXTRA_HEARTS = 9u;
+// Min/Max size of satellite hearts
+inline constexpr int kSatelliteMinSize = 32;
+inline constexpr int kSatelliteMaxSize = 72;
+
+// Heart animation state. The four strokes drawn by DrawHeart all key off
+// (g_heart_step / g_heart_max_steps) so they reach their meeting points
+// simultaneously. Advance g_heart_step by 1 per TIMER_HEARTS tick.
+extern int g_heart_step;
+extern const int g_heart_max_steps;
+
 // Draws a single heart, see .cc
 void DrawHeart(HWND hWnd, RECT boundingRect);
+
+// Gets the desired font at the specified size, defaults to Tahoma.
+HFONT GetFont(std::wstring font = L"Tahoma", int size);
 
 // Fills a rect with a solid color. Wraps the CreateSolidBrush + FillRect
 // + DeleteObject trio so call sites don't have to repeat all three (and
