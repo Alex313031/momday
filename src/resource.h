@@ -22,6 +22,7 @@
 
 // Timers
 #define TIMER_HEARTS                300 // Timer ID for painting
+#define TIMER_TOOLTIP               301 // One-shot timer that dismisses the click tooltip
 
 // Custom posted-message IDs (WM_APP range, guaranteed to not clash with any
 // system / common-control message). Used to defer work that mustn't run

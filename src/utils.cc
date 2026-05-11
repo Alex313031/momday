@@ -11,16 +11,26 @@ const std::wstring kMessage2 = L" - Made with love in C++ by the Frickster";
 
 // Text for tooltip popup.
 const std::wstring kToolTip1() {
-  const std::wstring msg =
-    L"I loves da " + is_stepmom_mode ? L"Laura" : L"Giovanna";
-  return msg;
+  return std::wstring(L"I loves da ") +
+         (is_stepmom_mode ? L"Laura" : L"Giovanna");
 }
+
+// Walked in order by the click handler in main.cc. Positive notes for
+// mom that show on the 2nd, 3rd, ... clicks until the cycle wraps back
+// to kToolTip1().
+const std::vector<std::wstring> kToolTip2 = {
+  L"Sending you a hug!",
+  L"Turn your wounds into wisdom.",
+  L"Thanks for putting up with me LOL.",
+  L"Have funny times with hubby!",
+  L"Wishing you a day filled with love and relaxation.",
+};
 
 namespace {
 constexpr double kPi = 3.14159265358979323846;
 // Sample count for one full top arc (a half circle, 0 -> +/-pi). Higher
 // values smooth the curve at the cost of more LineTo segments per frame.
-constexpr int kFullArcSamples = 128;
+constexpr int kFullArcSamples = 256;
 }  // namespace
 
 int g_heart_step = 0;
@@ -276,14 +286,13 @@ void FillHeart(HWND hWnd, RECT boundingRect, COLORREF fillColor) {
   ReleaseDC(hWnd, hdc);
 }
 
-HFONT GetFont(int size, std::wstring font) {
+HFONT GetFont(int size, std::wstring font, bool italic) {
   // Negative height = "character height" in logical units (the cap
   // box), so passing -size yields ~size-pixel-tall glyphs on a
   // standard MM_TEXT DC. ANTIALIASED_QUALITY keeps big text from
   // looking jagged - the rest of the app embraces a retro aliased
   // look but 72-px text without smoothing is unreadable.
-  // bItalic = TRUE turns on the italic style for the requested face.
-  return CreateFontW(-size, 0, 0, 0, FW_NORMAL, TRUE, FALSE, FALSE,
+  return CreateFontW(-size, 0, 0, 0, FW_NORMAL, italic ? TRUE : FALSE, FALSE, FALSE,
                      DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                      ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
                      font.c_str());
@@ -295,7 +304,8 @@ void DrawMarquee(HWND hWnd,
                  const std::wstring& text,
                  int fontSize,
                  double progress,
-                 bool slideFromLeft) {
+                 bool slideFromLeft,
+                 std::wstring fontFace) {
   if (hWnd == nullptr || text.empty() || fontSize <= 0) {
     return;
   }
@@ -303,7 +313,7 @@ void DrawMarquee(HWND hWnd,
   if (hdc == nullptr) {
     return;
   }
-  HFONT hFont = GetFont(fontSize);
+  HFONT hFont = GetFont(fontSize, fontFace);
   if (hFont == nullptr) {
     ReleaseDC(hWnd, hdc);
     return;
@@ -337,6 +347,90 @@ void DrawMarquee(HWND hWnd,
   const int oldBkMode      = SetBkMode(hdc, TRANSPARENT);
   const COLORREF oldColor  = SetTextColor(hdc, RGB_WHITE);
   TextOutW(hdc, x, yPos, text.c_str(), static_cast<int>(text.length()));
+  SetTextColor(hdc, oldColor);
+  SetBkMode(hdc, oldBkMode);
+
+  SelectObject(hdc, hOldFont);
+  DeleteObject(hFont);
+  ReleaseDC(hWnd, hdc);
+}
+
+void DrawTooltipPopup(HWND hWnd, POINT cursorPos, const std::wstring& text) {
+  if (hWnd == nullptr || text.empty()) {
+    return;
+  }
+  HDC hdc = GetDC(hWnd);
+  if (hdc == nullptr) {
+    return;
+  }
+  // Tooltip text reads better non-italic, even though the marquees use
+  // italic Tahoma elsewhere.
+  constexpr int kTooltipFontSize = 14;
+  HFONT hFont = GetFont(kTooltipFontSize, L"Arial", /*italic=*/false);
+  if (hFont == nullptr) {
+    ReleaseDC(hWnd, hdc);
+    return;
+  }
+  HFONT hOldFont = static_cast<HFONT>(SelectObject(hdc, hFont));
+
+  SIZE textSize = {0, 0};
+  GetTextExtentPoint32W(hdc, text.c_str(), static_cast<int>(text.length()),
+                        &textSize);
+
+  // Padding inside the box, and how far below/right of the cursor the
+  // box anchors. Matches the typical Windows hover-tooltip offset.
+  constexpr int kPadX          = 6;
+  constexpr int kPadY          = 3;
+  constexpr int kCursorOffsetX = 12;
+  constexpr int kCursorOffsetY = 18;
+
+  RECT box;
+  box.left   = cursorPos.x + kCursorOffsetX;
+  box.top    = cursorPos.y + kCursorOffsetY;
+  box.right  = box.left + textSize.cx + kPadX * 2;
+  box.bottom = box.top + textSize.cy + kPadY * 2;
+
+  // Clamp against the client rect so the tooltip never paints past the
+  // edges of the window (e.g. clicking near the right or bottom edge).
+  RECT client;
+  GetClientRect(hWnd, &client);
+  if (box.right > client.right) {
+    const LONG shift = box.right - client.right;
+    box.left -= shift;
+    box.right -= shift;
+  }
+  if (box.bottom > client.bottom) {
+    const LONG shift = box.bottom - client.bottom;
+    box.top -= shift;
+    box.bottom -= shift;
+  }
+  if (box.left < client.left) {
+    box.left = client.left;
+  }
+  if (box.top < client.top) {
+    box.top = client.top;
+  }
+
+  // Classic Windows tooltip yellow.
+  static constexpr COLORREF kTooltipBg = RGB(255, 255, 225);
+  HBRUSH hBrush = CreateSolidBrush(kTooltipBg);
+  if (hBrush != nullptr) {
+    FillRect(hdc, &box, hBrush);
+    DeleteObject(hBrush);
+  }
+  // 1-px black border via Rectangle with a hollow brush.
+  HPEN hPen     = CreatePen(PS_SOLID, 1, RGB_BLACK);
+  HPEN hOldPen  = static_cast<HPEN>(SelectObject(hdc, hPen));
+  HBRUSH hOldBr = static_cast<HBRUSH>(SelectObject(hdc, GetStockObject(NULL_BRUSH)));
+  Rectangle(hdc, box.left, box.top, box.right, box.bottom);
+  SelectObject(hdc, hOldBr);
+  SelectObject(hdc, hOldPen);
+  DeleteObject(hPen);
+
+  const int oldBkMode     = SetBkMode(hdc, TRANSPARENT);
+  const COLORREF oldColor = SetTextColor(hdc, RGB_BLACK);
+  TextOutW(hdc, box.left + kPadX, box.top + kPadY, text.c_str(),
+           static_cast<int>(text.length()));
   SetTextColor(hdc, oldColor);
   SetBkMode(hdc, oldBkMode);
 

@@ -27,7 +27,13 @@ static constexpr bool wild_satellites = false;
 // Strings printed in UI
 extern const std::wstring kMessage1;
 extern const std::wstring kMessage2;
-extern const std::wstring kToolTip1();
+const std::wstring kToolTip1();
+
+// Subsequent-click tooltip pool. The click handler walks this array
+// in order (not randomly) and re-shows kToolTip1() at the top of each
+// cycle - so click 1 always shows "I love...", clicks 2..N+1 show
+// kToolTip2[0..N-1], click N+2 wraps back to kToolTip1(), etc.
+extern const std::vector<std::wstring> kToolTip2;
 
 // Default desired ant canvas size (NOT the outer window size). wWinMain
 // adds the OS chrome and the toolbar's measured height on top of these
@@ -79,13 +85,15 @@ void DrawHeart(HWND hWnd, RECT boundingRect, COLORREF outlineColor = RGB_MAGENTA
 void FillHeart(HWND hWnd, RECT boundingRect, COLORREF fillColor);
 
 // Gets the desired font at the specified size (in pixels). Face name
-// defaults to Tahoma. Caller owns the returned HFONT and must
-// DeleteObject it when done. Returns nullptr on failure.
+// defaults to Tahoma; `italic` defaults to true to keep the existing
+// marquee call sites italic without having to spell it out at every
+// call. Caller owns the returned HFONT and must DeleteObject it when
+// done. Returns nullptr on failure.
 //
 // (Param order: size first because in C++ a defaulted parameter can't
 // precede a non-defaulted one - so the original "font first, size
 // second" wouldn't compile.)
-HFONT GetFont(int size, std::wstring font = L"Tahoma");
+HFONT GetFont(int size, std::wstring font = L"Tahoma", bool italic = true);
 
 // Slides `text` in to horizontally centered, with its top edge anchored
 // at `yPos` inside `clientRect`. `progress` is the animation progress in
@@ -100,7 +108,15 @@ void DrawMarquee(HWND hWnd,
                  const std::wstring& text,
                  int fontSize,
                  double progress,
-                 bool slideFromLeft = false);
+                 bool slideFromLeft = false,
+                 std::wstring fontFace = L"Tahoma");
+
+// Draws a classic Win32-style tooltip balloon (yellow background, black
+// 1-px border, black text) with its top-left anchored just below and
+// to the right of `cursorPos`. The box is clamped so it stays inside
+// the client rect. Caller controls when this fires and how long the
+// tooltip stays up - this just paints one frame.
+void DrawTooltipPopup(HWND hWnd, POINT cursorPos, const std::wstring& text);
 
 // Fills a rect with a solid color. Wraps the CreateSolidBrush + FillRect
 // + DeleteObject trio so call sites don't have to repeat all three (and

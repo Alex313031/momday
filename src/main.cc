@@ -67,6 +67,16 @@ struct SatelliteFrame {
 };
 static SatelliteFrame s_regen_frame = {0, 0, 0};
 
+// Click-tooltip state. WM_LBUTTONDOWN snapshots the cursor position and
+// the kToolTip1() text, flips s_tooltip_visible on, and arms a one-shot
+// TIMER_TOOLTIP that clears the flag so the tooltip auto-dismisses.
+// WM_PAINT draws DrawTooltipPopup last (on top of everything else)
+// whenever the flag is set.
+constexpr UINT kTooltipDismissMs = 2500;
+static bool s_tooltip_visible    = false;
+static POINT s_tooltip_pos       = {0, 0};
+static std::wstring s_tooltip_text;
+
 // Re-rolls s_satellite_rects with up to MAX_EXTRA_HEARTS non-overlapping
 // rects. Each rect's width and height are drawn independently from
 // [kSatelliteMinSize, kSatelliteMaxSize], and placement is rejected if
@@ -86,15 +96,26 @@ static void RegenerateSatellites(int clientW, int clientH, const RECT& mainRect)
   std::uniform_int_distribution<size_t> colorDist(
       0, (sizeof(kSatelliteColors) / sizeof(kSatelliteColors[0])) - 1);
   constexpr int kMaxAttemptsPerHeart = 32;
+  // Keep at least this many pixels between every satellite rect and the
+  // client edges. Hearts that touch the edge get visually clipped on
+  // the side facing the edge (one half of a lobe disappears) which
+  // looks broken; a 1-px margin keeps the full outline visible.
+  constexpr int kSatelliteEdgeMargin = 1;
   for (UINT i = 0; i < MAX_EXTRA_HEARTS; ++i) {
     for (int attempt = 0; attempt < kMaxAttemptsPerHeart; ++attempt) {
       const int w = sizeDist(rng);
       const int h = sizeDist(rng);
-      if (w >= clientW || h >= clientH) {
+      // Need w + 2*margin pixels horizontally (and same vertically) so
+      // that there's at least one valid placement with the requested
+      // edge gap on both sides.
+      if (w + 2 * kSatelliteEdgeMargin > clientW ||
+          h + 2 * kSatelliteEdgeMargin > clientH) {
         continue;
       }
-      std::uniform_int_distribution<int> xDist(0, clientW - w);
-      std::uniform_int_distribution<int> yDist(0, clientH - h);
+      std::uniform_int_distribution<int> xDist(
+          kSatelliteEdgeMargin, clientW - w - kSatelliteEdgeMargin);
+      std::uniform_int_distribution<int> yDist(
+          kSatelliteEdgeMargin, clientH - h - kSatelliteEdgeMargin);
       const int x = xDist(rng);
       const int y = yDist(rng);
       RECT candidate     = {x, y, x + w, y + h};
@@ -257,8 +278,40 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
         if (advanced) {
           InvalidateRect(hWnd, nullptr, FALSE);
         }
+      } else if (wParam == TIMER_TOOLTIP) {
+        // One-shot dismiss: kill the timer so it can't refire, clear
+        // the visibility flag, and trigger a repaint to wipe the
+        // tooltip from the window.
+        KillTimer(hWnd, TIMER_TOOLTIP);
+        s_tooltip_visible = false;
+        InvalidateRect(hWnd, nullptr, FALSE);
       }
       break;
+    case WM_LBUTTONDOWN: {
+      // Cycle: index 0 -> kToolTip1() ("I love..."), indices 1..N ->
+      // kToolTip2[idx-1]. Wraps modulo (1 + kToolTip2.size()) so the
+      // first click after every wrap is always the "I love..." again,
+      // and the rest are walked in array order (not random).
+      static size_t s_tooltip_cycle = 0;
+      const size_t cycleLen = 1 + kToolTip2.size();
+      const size_t idx     = s_tooltip_cycle % cycleLen;
+      // GET_X_LPARAM / GET_Y_LPARAM are signed because clicks on the
+      // window edge during a capture-drag can briefly report negative
+      // client coords; the tooltip clamping in DrawTooltipPopup
+      // handles those.
+      s_tooltip_pos.x   = GET_X_LPARAM(lParam);
+      s_tooltip_pos.y   = GET_Y_LPARAM(lParam);
+      s_tooltip_text    = (idx == 0) ? kToolTip1() : kToolTip2[idx - 1];
+      s_tooltip_visible = true;
+      ++s_tooltip_cycle;
+      // Reset the dismiss timer on every click so a fresh click
+      // restarts the 2.5-s window instead of being dismissed by a
+      // stale fire from the previous click.
+      KillTimer(hWnd, TIMER_TOOLTIP);
+      SetTimer(hWnd, TIMER_TOOLTIP, kTooltipDismissMs, nullptr);
+      InvalidateRect(hWnd, nullptr, FALSE);
+      break;
+    }
     case WM_APP_AUTOPLAY:
       break;
     case WM_ERASEBKGND:
@@ -371,7 +424,13 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
         const double subProgress = static_cast<double>(g_subtext_step) /
                                    static_cast<double>(g_subtext_max_steps);
         DrawMarquee(hWnd, client, subY, kMessage2, kSubMarqueeFontSize, subProgress,
-                    /*slideFromLeft=*/true);
+                    /*slideFromLeft=*/true, L"Lucida Console");
+      }
+      // Tooltip stays on top of the hearts and marquees - draw it last.
+      // (Outside the `side >= 8` block so it still shows even on a
+      // window too tiny to render the heart.)
+      if (s_tooltip_visible) {
+        DrawTooltipPopup(hWnd, s_tooltip_pos, s_tooltip_text);
       }
       break;
     }
@@ -427,6 +486,7 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
       return TRUE;
     case WM_DESTROY:
       KillTimer(hWnd, TIMER_HEARTS);
+      KillTimer(hWnd, TIMER_TOOLTIP);
       PostQuitMessage(0);
       break;
     case WM_NCDESTROY:
