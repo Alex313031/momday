@@ -77,6 +77,20 @@ static bool s_tooltip_visible    = false;
 static POINT s_tooltip_pos       = {0, 0};
 static std::wstring s_tooltip_text;
 
+// Middle-drag-to-resize state. We can't use the WM_NCLBUTTONDOWN trick
+// (which drops the OS into its modal sizing loop) because that loop
+// only exits on a *left* mouse-up. Instead we capture the mouse on
+// WM_MBUTTONDOWN, anchor the opposite corner, and drive SetWindowPos
+// directly from WM_MOUSEMOVE until WM_MBUTTONUP / WM_CAPTURECHANGED.
+// (Right-click is left free for a future popup menu.)
+static bool s_resizing                 = false;
+static POINT s_resize_start_screen     = {0, 0};
+static RECT s_resize_start_window      = {0, 0, 0, 0};
+static WPARAM s_resize_corner          = HTBOTTOMRIGHT;
+// Smallest window we'll let the right-drag resize produce. Mirrors the
+// floor in WM_GETMINMAXINFO so manual dragging can't undercut it.
+constexpr int kMinResizeWindowSide     = 200;
+
 // Re-rolls s_satellite_rects with up to MAX_EXTRA_HEARTS non-overlapping
 // rects. Each rect's width and height are drawn independently from
 // [kSatelliteMinSize, kSatelliteMaxSize], and placement is rejected if
@@ -312,6 +326,96 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
       InvalidateRect(hWnd, nullptr, FALSE);
       break;
     }
+    case WM_MBUTTONDOWN: {
+      // Start a middle-drag resize: pick the corner nearest the cursor
+      // (so the opposite corner stays anchored), snapshot the cursor
+      // and window in screen coords, take the mouse capture so we
+      // keep getting MOUSEMOVE messages even when the cursor leaves
+      // the client area, and flip s_resizing on. WM_MOUSEMOVE does
+      // the actual resize, WM_MBUTTONUP / WM_CAPTURECHANGED end it.
+      const int px = GET_X_LPARAM(lParam);
+      const int py = GET_Y_LPARAM(lParam);
+      RECT client;
+      GetClientRect(hWnd, &client);
+      const int midX = (client.left + client.right) / 2;
+      const int midY = (client.top + client.bottom) / 2;
+      if (px < midX && py < midY) {
+        s_resize_corner = HTTOPLEFT;
+      } else if (px >= midX && py < midY) {
+        s_resize_corner = HTTOPRIGHT;
+      } else if (px < midX && py >= midY) {
+        s_resize_corner = HTBOTTOMLEFT;
+      } else {
+        s_resize_corner = HTBOTTOMRIGHT;
+      }
+      GetCursorPos(&s_resize_start_screen);
+      GetWindowRect(hWnd, &s_resize_start_window);
+      SetCapture(hWnd);
+      s_resizing = true;
+      break;
+    }
+    case WM_MOUSEMOVE: {
+      if (s_resizing) {
+        // Compute the new window rect by moving only the dragged
+        // corner's two edges by the screen-space cursor delta. Then
+        // clamp width/height against the minimum, anchoring the
+        // *opposite* edge so the anchor side doesn't drift when we
+        // bottom out.
+        POINT cur;
+        GetCursorPos(&cur);
+        const int dx = cur.x - s_resize_start_screen.x;
+        const int dy = cur.y - s_resize_start_screen.y;
+        RECT r = s_resize_start_window;
+        switch (s_resize_corner) {
+          case HTTOPLEFT:
+            r.left += dx;
+            r.top += dy;
+            break;
+          case HTTOPRIGHT:
+            r.right += dx;
+            r.top += dy;
+            break;
+          case HTBOTTOMLEFT:
+            r.left += dx;
+            r.bottom += dy;
+            break;
+          case HTBOTTOMRIGHT:
+          default:
+            r.right += dx;
+            r.bottom += dy;
+            break;
+        }
+        if (r.right - r.left < kMinResizeWindowSide) {
+          if (s_resize_corner == HTTOPLEFT || s_resize_corner == HTBOTTOMLEFT) {
+            r.left = r.right - kMinResizeWindowSide;
+          } else {
+            r.right = r.left + kMinResizeWindowSide;
+          }
+        }
+        if (r.bottom - r.top < kMinResizeWindowSide) {
+          if (s_resize_corner == HTTOPLEFT || s_resize_corner == HTTOPRIGHT) {
+            r.top = r.bottom - kMinResizeWindowSide;
+          } else {
+            r.bottom = r.top + kMinResizeWindowSide;
+          }
+        }
+        SetWindowPos(hWnd, nullptr, r.left, r.top,
+                     r.right - r.left, r.bottom - r.top,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+      }
+      break;
+    }
+    case WM_MBUTTONUP:
+      if (s_resizing) {
+        ReleaseCapture();  // triggers WM_CAPTURECHANGED, which clears s_resizing
+      }
+      break;
+    case WM_CAPTURECHANGED:
+      // Fired when capture is released for any reason (our own
+      // ReleaseCapture, an alt-tab, another window stealing it, etc.).
+      // Clearing here is the single point of truth for ending a drag.
+      s_resizing = false;
+      break;
     case WM_APP_AUTOPLAY:
       break;
     case WM_ERASEBKGND:
@@ -409,7 +513,7 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
         // off-screen until the heart and the top marquee are done.
         constexpr int kMarqueeFontSize    = 72;
         constexpr int kMarqueeTopPad      = 8;
-        constexpr int kSubMarqueeFontSize = 36;
+        constexpr int kSubMarqueeFontSize = 24;
         const double heartProgress =
             static_cast<double>(g_heart_step) / static_cast<double>(g_heart_max_steps);
         DrawMarquee(hWnd, client, kMarqueeTopPad, kMessage1, kMarqueeFontSize,
