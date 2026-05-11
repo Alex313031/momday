@@ -11,7 +11,7 @@ const std::wstring kMessage2 = L" - Made with love in C++ by the Frickster";
 
 // Text for tooltip popup.
 const std::wstring kToolTip1() {
-  return std::wstring(L"I loves da ") +
+  return std::wstring(L"I loves da' ") +
          (is_stepmom_mode ? L"Laura" : L"Giovanna");
 }
 

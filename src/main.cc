@@ -398,6 +398,26 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
       InvalidateRect(hWnd, nullptr, FALSE);
       break;
     }
+    case WM_RBUTTONDOWN: {
+      // Right-click pops up the File submenu at the cursor. We grab
+      // the live menu off the window (vs LoadMenu / a fresh handle)
+      // so any future runtime menu state - greys, checks, etc. - is
+      // mirrored. TrackPopupMenu's selections come back as WM_COMMAND
+      // with the same IDs as the menu bar, so IDM_REPAINT / IDM_EXIT
+      // re-use their existing handlers automatically.
+      HMENU hMenuBar = GetMenu(hWnd);
+      if (hMenuBar != nullptr) {
+        // File is the first popup in IDR_MAIN (see momday.rc).
+        HMENU hFileMenu = GetSubMenu(hMenuBar, 0);
+        if (hFileMenu != nullptr) {
+          POINT screenPt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+          ClientToScreen(hWnd, &screenPt);
+          TrackPopupMenu(hFileMenu, TPM_RIGHTBUTTON | TPM_LEFTALIGN,
+                         screenPt.x, screenPt.y, 0, hWnd, nullptr);
+        }
+      }
+      break;
+    }
     case WM_MBUTTONDOWN: {
       // Start a middle-drag resize: pick the corner nearest the cursor
       // (so the opposite corner stays anchored), snapshot the cursor
@@ -627,6 +647,16 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
         case IDM_HELP:
           LaunchHelp(hWnd);
           break;
+        case IDM_REPAINT:
+          // Force a fresh satellite layout: marking the layout dirty
+          // makes the next WM_PAINT call RegenerateSatellites, which
+          // re-rolls positions, sizes, and colors. The new SatelliteHeart
+          // structs are constructed with filled = false, so any
+          // previously-clicked-and-filled hearts revert back to outline
+          // only - exactly the "click them again, pretty colors" loop.
+          s_satellites_dirty = true;
+          InvalidateRect(hWnd, nullptr, FALSE);
+          break;
         default:
           return DefWindowProcW(hWnd, message, wParam, lParam);
       }
@@ -640,6 +670,14 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
     case WM_QUERYENDSESSION:
       return TRUE;
     case WM_DESTROY:
+      // If the window is dying mid middle-drag-resize (e.g. Alt+F4
+      // while MMB is held), release capture explicitly. The OS would
+      // do it anyway when the window goes away, but being explicit
+      // means s_resizing stays in a consistent state.
+      if (s_resizing) {
+        ReleaseCapture();
+        s_resizing = false;
+      }
       KillTimer(hWnd, TIMER_HEARTS);
       KillTimer(hWnd, TIMER_TOOLTIP);
       PostQuitMessage(0);
@@ -666,7 +704,12 @@ bool InitApp(HWND hWnd) {
 }
 
 void ShutDownApp() {
-  DestroyWindow(mainHwnd);
+  // mainHwnd is cleared in WM_NCDESTROY; guard so a duplicate exit
+  // path (e.g. WM_CLOSE arriving after WM_DESTROY's tear-down began)
+  // doesn't pass NULL to DestroyWindow, which is undefined per MSDN.
+  if (mainHwnd != nullptr) {
+    DestroyWindow(mainHwnd);
+  }
 }
 
 bool LaunchHelp(HWND hWnd) {
