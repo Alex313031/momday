@@ -51,18 +51,13 @@ const int g_subtext_max_steps = 100;
 // Progress (g_heart_step / g_heart_max_steps) drives all four strokes off
 // the same parameter, so the top arcs and the V lines all arrive at the
 // side meeting points simultaneously when progress hits 1.0.
-void DrawHeart(HWND hWnd, RECT boundingRect, COLORREF outlineColor) {
-  if (hWnd == nullptr) {
-    return;
-  }
-  HDC hdc = GetDC(hWnd);
+void DrawHeart(HDC hdc, RECT boundingRect, COLORREF outlineColor) {
   if (hdc == nullptr) {
     return;
   }
 
   HPEN hPen = CreatePen(PS_SOLID, 2, outlineColor);
   if (hPen == nullptr) {
-    ReleaseDC(hWnd, hdc);
     return;
   }
   HPEN hOldPen = static_cast<HPEN>(SelectObject(hdc, hPen));
@@ -201,24 +196,19 @@ void DrawHeart(HWND hWnd, RECT boundingRect, COLORREF outlineColor) {
 
   SelectObject(hdc, hOldPen);
   DeleteObject(hPen);
-  ReleaseDC(hWnd, hdc);
 }
 
 // Geometry has to mirror DrawHeart's. If you tweak the heart shape there
 // (lobe radius, extraSweep formula, meeting points, etc.), update the
 // matching block here too or the fill will start poking out from under
 // the outline.
-void FillHeart(HWND hWnd, RECT boundingRect, COLORREF fillColor) {
-  if (hWnd == nullptr) {
+void FillHeart(HDC hdc, RECT boundingRect, COLORREF fillColor) {
+  if (hdc == nullptr) {
     return;
   }
   const double W = static_cast<double>(boundingRect.right - boundingRect.left);
   const double H = static_cast<double>(boundingRect.bottom - boundingRect.top);
   if (W < 4.0 || H < 4.0) {
-    return;
-  }
-  HDC hdc = GetDC(hWnd);
-  if (hdc == nullptr) {
     return;
   }
 
@@ -272,7 +262,6 @@ void FillHeart(HWND hWnd, RECT boundingRect, COLORREF fillColor) {
 
   HBRUSH hBrush = CreateSolidBrush(fillColor);
   if (hBrush == nullptr) {
-    ReleaseDC(hWnd, hdc);
     return;
   }
   // NULL_PEN suppresses Polygon's outline pass - we only want the fill,
@@ -283,7 +272,6 @@ void FillHeart(HWND hWnd, RECT boundingRect, COLORREF fillColor) {
   SelectObject(hdc, hOldBrush);
   SelectObject(hdc, hOldPen);
   DeleteObject(hBrush);
-  ReleaseDC(hWnd, hdc);
 }
 
 HFONT GetFont(int size, std::wstring font, bool italic) {
@@ -298,7 +286,7 @@ HFONT GetFont(int size, std::wstring font, bool italic) {
                      font.c_str());
 }
 
-void DrawMarquee(HWND hWnd,
+void DrawMarquee(HDC hdc,
                  RECT clientRect,
                  int yPos,
                  const std::wstring& text,
@@ -306,16 +294,11 @@ void DrawMarquee(HWND hWnd,
                  double progress,
                  bool slideFromLeft,
                  std::wstring fontFace) {
-  if (hWnd == nullptr || text.empty() || fontSize <= 0) {
-    return;
-  }
-  HDC hdc = GetDC(hWnd);
-  if (hdc == nullptr) {
+  if (hdc == nullptr || text.empty() || fontSize <= 0) {
     return;
   }
   HFONT hFont = GetFont(fontSize, fontFace);
   if (hFont == nullptr) {
-    ReleaseDC(hWnd, hdc);
     return;
   }
   HFONT hOldFont = static_cast<HFONT>(SelectObject(hdc, hFont));
@@ -352,15 +335,13 @@ void DrawMarquee(HWND hWnd,
 
   SelectObject(hdc, hOldFont);
   DeleteObject(hFont);
-  ReleaseDC(hWnd, hdc);
 }
 
-void DrawTooltipPopup(HWND hWnd, POINT cursorPos, const std::wstring& text) {
-  if (hWnd == nullptr || text.empty()) {
-    return;
-  }
-  HDC hdc = GetDC(hWnd);
-  if (hdc == nullptr) {
+void DrawTooltipPopup(HDC hdc,
+                      RECT clientRect,
+                      POINT cursorPos,
+                      const std::wstring& text) {
+  if (hdc == nullptr || text.empty()) {
     return;
   }
   // Tooltip text reads better non-italic, even though the marquees use
@@ -368,7 +349,6 @@ void DrawTooltipPopup(HWND hWnd, POINT cursorPos, const std::wstring& text) {
   constexpr int kTooltipFontSize = 14;
   HFONT hFont = GetFont(kTooltipFontSize, L"Arial", /*italic=*/false);
   if (hFont == nullptr) {
-    ReleaseDC(hWnd, hdc);
     return;
   }
   HFONT hOldFont = static_cast<HFONT>(SelectObject(hdc, hFont));
@@ -392,23 +372,21 @@ void DrawTooltipPopup(HWND hWnd, POINT cursorPos, const std::wstring& text) {
 
   // Clamp against the client rect so the tooltip never paints past the
   // edges of the window (e.g. clicking near the right or bottom edge).
-  RECT client;
-  GetClientRect(hWnd, &client);
-  if (box.right > client.right) {
-    const LONG shift = box.right - client.right;
+  if (box.right > clientRect.right) {
+    const LONG shift = box.right - clientRect.right;
     box.left -= shift;
     box.right -= shift;
   }
-  if (box.bottom > client.bottom) {
-    const LONG shift = box.bottom - client.bottom;
+  if (box.bottom > clientRect.bottom) {
+    const LONG shift = box.bottom - clientRect.bottom;
     box.top -= shift;
     box.bottom -= shift;
   }
-  if (box.left < client.left) {
-    box.left = client.left;
+  if (box.left < clientRect.left) {
+    box.left = clientRect.left;
   }
-  if (box.top < client.top) {
-    box.top = client.top;
+  if (box.top < clientRect.top) {
+    box.top = clientRect.top;
   }
 
   // Classic Windows tooltip yellow.
@@ -436,7 +414,6 @@ void DrawTooltipPopup(HWND hWnd, POINT cursorPos, const std::wstring& text) {
 
   SelectObject(hdc, hOldFont);
   DeleteObject(hFont);
-  ReleaseDC(hWnd, hdc);
 }
 
 bool FillRectWithColor(HDC hdc, const RECT& rc, COLORREF color) {
@@ -462,33 +439,32 @@ void FillRectWithGradient(HDC hdc,
   if (hdc == nullptr) {
     return;
   }
-  const int height = rc.bottom - rc.top;
-  if (height <= 0 || rc.right <= rc.left) {
+  if (rc.bottom <= rc.top || rc.right <= rc.left) {
     return;
   }
-  const int r1 = GetRValue(topColor);
-  const int g1 = GetGValue(topColor);
-  const int b1 = GetBValue(topColor);
-  const int r2 = GetRValue(bottomColor);
-  const int g2 = GetGValue(bottomColor);
-  const int b2 = GetBValue(bottomColor);
-  // One filled row per scan line. Denominator is (height - 1) so the
-  // very last row lands exactly on bottomColor instead of one step
-  // shy of it.
-  const double invSpan = (height > 1) ? 1.0 / (height - 1) : 0.0;
-  for (int y = rc.top; y < rc.bottom; ++y) {
-    const double t = (y - rc.top) * invSpan;
-    const int r = static_cast<int>(std::lround(r1 + (r2 - r1) * t));
-    const int g = static_cast<int>(std::lround(g1 + (g2 - g1) * t));
-    const int b = static_cast<int>(std::lround(b1 + (b2 - b1) * t));
-    HBRUSH hBr = CreateSolidBrush(RGB(r, g, b));
-    if (hBr == nullptr) {
-      continue;
-    }
-    RECT row = {rc.left, y, rc.right, y + 1};
-    FillRect(hdc, &row, hBr);
-    DeleteObject(hBr);
-  }
+  // GradientFill (msimg32, available since Win98/Win2K) interpolates
+  // per-pixel inside GDI in a single call - cheaper than stamping a
+  // brush per scan line, and pairs well with the WM_PAINT back buffer:
+  // the whole gradient lands in one shot before BitBlt to the window.
+  //
+  // TRIVERTEX color channels are USHORT (0..0xFFFF), so each COLORREF
+  // byte is left-shifted by 8 to fill the high byte. Alpha is unused
+  // for GRADIENT_FILL_RECT_V but the struct member still has to exist.
+  TRIVERTEX vertex[2];
+  vertex[0].x     = rc.left;
+  vertex[0].y     = rc.top;
+  vertex[0].Red   = static_cast<COLOR16>(GetRValue(topColor) << 8);
+  vertex[0].Green = static_cast<COLOR16>(GetGValue(topColor) << 8);
+  vertex[0].Blue  = static_cast<COLOR16>(GetBValue(topColor) << 8);
+  vertex[0].Alpha = 0;
+  vertex[1].x     = rc.right;
+  vertex[1].y     = rc.bottom;
+  vertex[1].Red   = static_cast<COLOR16>(GetRValue(bottomColor) << 8);
+  vertex[1].Green = static_cast<COLOR16>(GetGValue(bottomColor) << 8);
+  vertex[1].Blue  = static_cast<COLOR16>(GetBValue(bottomColor) << 8);
+  vertex[1].Alpha = 0;
+  GRADIENT_RECT gradientRect = {0, 1};
+  GradientFill(hdc, vertex, 2, &gradientRect, 1, GRADIENT_FILL_RECT_V);
 }
 
 const std::wstring GetExeDir() {

@@ -31,6 +31,7 @@ config("momday_config") {
     "comctl32",
     "comdlg32",
     "gdi32",
+    "msimg32",
     "winmm",
   ]
 }

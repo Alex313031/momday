@@ -75,14 +75,16 @@ extern const int g_heart_max_steps;
 extern int g_subtext_step;
 extern const int g_subtext_max_steps;
 
-// Draws a single heart with a 2-px outline in `outlineColor`. See .cc
-// for the geometry. Default color is magenta to match the main heart.
-void DrawHeart(HWND hWnd, RECT boundingRect, COLORREF outlineColor = RGB_MAGENTA);
+// Draws a single heart with a 2-px outline in `outlineColor` onto `hdc`.
+// See .cc for the geometry. Default color is magenta to match the main
+// heart. Caller owns the DC (typically the WM_PAINT back-buffer DC).
+void DrawHeart(HDC hdc, RECT boundingRect, COLORREF outlineColor = RGB_MAGENTA);
 
 // Fills the heart's interior (the closed shape that DrawHeart traces at
-// progress == 1.0) with `fillColor`. Call BEFORE DrawHeart so the
-// outline lands on top of the fill instead of being covered by it.
-void FillHeart(HWND hWnd, RECT boundingRect, COLORREF fillColor);
+// progress == 1.0) with `fillColor` onto `hdc`. Call BEFORE DrawHeart
+// so the outline lands on top of the fill instead of being covered by
+// it.
+void FillHeart(HDC hdc, RECT boundingRect, COLORREF fillColor);
 
 // Gets the desired font at the specified size (in pixels). Face name
 // defaults to Tahoma; `italic` defaults to true to keep the existing
@@ -102,7 +104,7 @@ HFONT GetFont(int size, std::wstring font = L"Tahoma", bool italic = true);
 // that waits until phase 2). `slideFromLeft == true` starts the text
 // fully off the left edge of clientRect; `false` starts it off the
 // right edge.
-void DrawMarquee(HWND hWnd,
+void DrawMarquee(HDC hdc,
                  RECT clientRect,
                  int yPos,
                  const std::wstring& text,
@@ -113,10 +115,14 @@ void DrawMarquee(HWND hWnd,
 
 // Draws a classic Win32-style tooltip balloon (yellow background, black
 // 1-px border, black text) with its top-left anchored just below and
-// to the right of `cursorPos`. The box is clamped so it stays inside
-// the client rect. Caller controls when this fires and how long the
-// tooltip stays up - this just paints one frame.
-void DrawTooltipPopup(HWND hWnd, POINT cursorPos, const std::wstring& text);
+// to the right of `cursorPos`. The box is clamped against `clientRect`
+// so the tooltip never paints past the window edges. Caller controls
+// when this fires and how long the tooltip stays up - this just paints
+// one frame onto `hdc`.
+void DrawTooltipPopup(HDC hdc,
+                      RECT clientRect,
+                      POINT cursorPos,
+                      const std::wstring& text);
 
 // Fills a rect with a solid color. Wraps the CreateSolidBrush + FillRect
 // + DeleteObject trio so call sites don't have to repeat all three (and
@@ -124,10 +130,10 @@ void DrawTooltipPopup(HWND hWnd, POINT cursorPos, const std::wstring& text);
 bool FillRectWithColor(HDC hdc, const RECT& rc, COLORREF color);
 
 // Fills a rect with a vertical gradient: rc.top maps to topColor and
-// rc.bottom maps to bottomColor, linearly interpolated per scan line.
-// One row per pixel - simple and avoids needing GdiGradientFill /
-// msimg32. Slightly wasteful (one brush per row) but trivial at the
-// scales we draw at.
+// rc.bottom maps to bottomColor. Delegates to GradientFill (msimg32),
+// which interpolates per-pixel inside GDI in one call - cheaper than
+// stamping a brush per scan line and lets the back buffer composite
+// in one shot.
 void FillRectWithGradient(HDC hdc,
                           const RECT& rc,
                           COLORREF topColor,

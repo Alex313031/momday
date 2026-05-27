@@ -148,6 +148,69 @@ static WPARAM s_resize_corner          = HTBOTTOMRIGHT;
 // floor in WM_GETMINMAXINFO so manual dragging can't undercut it.
 constexpr int kMinResizeWindowSide     = 200;
 
+// Cached back buffer for WM_PAINT. Every drawing helper renders into
+// g_memDC, then a single BitBlt to the window DC commits the frame -
+// the user never sees intermediate states (the gradient appearing,
+// hearts popping in, marquees, etc.), which is what kills the flicker.
+// Recreated on WM_SIZE so the bitmap always matches the client area;
+// destroyed in WM_DESTROY.
+static HDC s_mem_dc            = nullptr;
+static HBITMAP s_mem_bitmap    = nullptr;
+static HBITMAP s_mem_old_bitmap = nullptr;
+static int s_mem_width         = 0;
+static int s_mem_height        = 0;
+
+// Tears down the cached back buffer. Safe to call when it's already
+// torn down (every handle is checked) - used both by the resize path
+// (right before we rebuild at the new size) and by WM_DESTROY.
+static void DestroyBackBuffer() {
+  if (s_mem_dc != nullptr) {
+    if (s_mem_old_bitmap != nullptr) {
+      SelectObject(s_mem_dc, s_mem_old_bitmap);
+      s_mem_old_bitmap = nullptr;
+    }
+    DeleteDC(s_mem_dc);
+    s_mem_dc = nullptr;
+  }
+  if (s_mem_bitmap != nullptr) {
+    DeleteObject(s_mem_bitmap);
+    s_mem_bitmap = nullptr;
+  }
+  s_mem_width  = 0;
+  s_mem_height = 0;
+}
+
+// Returns a memDC sized to width x height, reusing the cached one if
+// the size matches. On allocation failure returns nullptr - WM_PAINT
+// falls back to painting directly to the window DC in that case (flickery
+// but still correct). windowDC is the source for CreateCompatibleDC /
+// CreateCompatibleBitmap so the back buffer matches the window's pixel
+// format.
+static HDC EnsureBackBuffer(HDC windowDC, int width, int height) {
+  if (width <= 0 || height <= 0) {
+    return nullptr;
+  }
+  if (s_mem_dc != nullptr && s_mem_width == width && s_mem_height == height) {
+    return s_mem_dc;
+  }
+  DestroyBackBuffer();
+  s_mem_dc = CreateCompatibleDC(windowDC);
+  if (s_mem_dc == nullptr) {
+    return nullptr;
+  }
+  s_mem_bitmap = CreateCompatibleBitmap(windowDC, width, height);
+  if (s_mem_bitmap == nullptr) {
+    DeleteDC(s_mem_dc);
+    s_mem_dc = nullptr;
+    return nullptr;
+  }
+  s_mem_old_bitmap =
+      static_cast<HBITMAP>(SelectObject(s_mem_dc, s_mem_bitmap));
+  s_mem_width  = width;
+  s_mem_height = height;
+  return s_mem_dc;
+}
+
 // Re-rolls s_satellite_rects with up to MAX_EXTRA_HEARTS non-overlapping
 // rects. Each rect's width and height are drawn independently from
 // [kSatelliteMinSize, kSatelliteMaxSize], and placement is rejected if
@@ -526,18 +589,27 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
       break;
     }
     case WM_PAINT: {
-      // WM_ERASEBKGND returned TRUE so Windows skipped its bg fill - we
-      // paint a vertical RGB_BLUE -> RGB_DARKBLUE gradient over the
-      // entire client rect (not just ps.rcPaint - we need the full
-      // client height so the gradient interpolation references the
-      // window, not the dirty region; BeginPaint's clip handles the
-      // rest). Then layer the heart on top via DrawHeart (its own DC).
+      // Double-buffered paint. WM_ERASEBKGND returned TRUE so Windows
+      // skipped its bg fill; we render the whole frame (gradient, main
+      // heart, satellites, marquees, tooltip) into a cached off-screen
+      // DC (s_mem_dc) and BitBlt it to the window once at the end. The
+      // user only ever sees fully-composed frames - no top-to-bottom
+      // gradient wipe, no heart-then-marquee popping, no flicker on
+      // resize (the helpers used to each open their own GetDC and
+      // paint straight to the window).
       PAINTSTRUCT ps;
       HDC hdc = BeginPaint(hWnd, &ps);
       RECT client;
       GetClientRect(hWnd, &client);
-      FillRectWithGradient(hdc, client, RGB_BLUE, RGB_DARKBLUE);
-      EndPaint(hWnd, &ps);
+      // Fall back to the window DC if the back buffer can't be
+      // allocated (out of GDI memory, etc.). Flickery but still
+      // correct - better than skipping the paint entirely.
+      HDC memDC = EnsureBackBuffer(hdc, client.right, client.bottom);
+      const bool buffered = (memDC != nullptr);
+      if (memDC == nullptr) {
+        memDC = hdc;
+      }
+      FillRectWithGradient(memDC, client, RGB_BLUE, RGB_DARKBLUE);
       // Heart is a centered square sized to ~75% of the smaller client
       // dimension so it scales with the window without crowding the edges.
       const LONG side = static_cast<LONG>(std::min(client.right, client.bottom) * 0.75f);
@@ -552,9 +624,9 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
         // before DrawHeart so the magenta outline lands on top of the
         // red fill instead of being covered by it.
         if (g_heart_step >= g_heart_max_steps) {
-          FillHeart(hWnd, heartRect, RGB_RED);
+          FillHeart(memDC, heartRect, RGB_RED);
         }
-        DrawHeart(hWnd, heartRect);
+        DrawHeart(memDC, heartRect);
 
         // Lazy regen: WM_SIZE marked us dirty (or this is the first
         // paint). Recompute the satellite layout against the current
@@ -572,9 +644,9 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
         for (const SatelliteHeart& s : s_satellite_rects) {
           const RECT r = TransformSatelliteRect(s.rect, heartRect);
           if (s.filled) {
-            FillHeart(hWnd, r, s.color);
+            FillHeart(memDC, r, s.color);
           }
-          DrawHeart(hWnd, r, s.color);
+          DrawHeart(memDC, r, s.color);
         }
 
         // Marquees: kMessage1 in the top margin (72-px), kMessage2 in
@@ -587,7 +659,7 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
         constexpr int kSubMarqueeFontSize = 24;
         const double heartProgress =
             static_cast<double>(g_heart_step) / static_cast<double>(g_heart_max_steps);
-        DrawMarquee(hWnd, client, kMarqueeTopPad, kMessage1, kMarqueeFontSize,
+        DrawMarquee(memDC, client, kMarqueeTopPad, kMessage1, kMarqueeFontSize,
                     heartProgress);
 
         // Center kMessage2 vertically inside the bottom-third band so
@@ -598,15 +670,22 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
             lowerThirdTop + ((client.bottom - lowerThirdTop) - kSubMarqueeFontSize) / 2;
         const double subProgress = static_cast<double>(g_subtext_step) /
                                    static_cast<double>(g_subtext_max_steps);
-        DrawMarquee(hWnd, client, subY, kMessage2, kSubMarqueeFontSize, subProgress,
+        DrawMarquee(memDC, client, subY, kMessage2, kSubMarqueeFontSize, subProgress,
                     /*slideFromLeft=*/true, L"Lucida Console");
       }
       // Tooltip stays on top of the hearts and marquees - draw it last.
       // (Outside the `side >= 8` block so it still shows even on a
       // window too tiny to render the heart.)
       if (s_tooltip_visible) {
-        DrawTooltipPopup(hWnd, s_tooltip_pos, s_tooltip_text);
+        DrawTooltipPopup(memDC, client, s_tooltip_pos, s_tooltip_text);
       }
+      // Commit the back buffer to the window in one shot. Only when we
+      // actually had a back buffer - the fallback path already drew
+      // straight to hdc, so the BitBlt would be a no-op-to-self.
+      if (buffered) {
+        BitBlt(hdc, 0, 0, client.right, client.bottom, memDC, 0, 0, SRCCOPY);
+      }
+      EndPaint(hWnd, &ps);
       break;
     }
     case WM_SIZE: {
@@ -680,6 +759,7 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
       }
       KillTimer(hWnd, TIMER_HEARTS);
       KillTimer(hWnd, TIMER_TOOLTIP);
+      DestroyBackBuffer();
       PostQuitMessage(0);
       break;
     case WM_NCDESTROY:
